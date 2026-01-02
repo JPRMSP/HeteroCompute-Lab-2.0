@@ -1,30 +1,26 @@
+```python
 import streamlit as st
 import numpy as np
 import time
 
 from numba import njit, prange
-
-try:
-    import pyopencl as cl
-    OPENCL_AVAILABLE = True
-except Exception:
-    OPENCL_AVAILABLE = False
+from numba import cuda
 
 
-st.title("⚡ HeteroCompute Lab 2.0 — CPU vs GPU Parallel Explorer")
-st.caption("FI9070 — Heterogeneous Computing | Real-time Demo")
+st.title("⚡ HeteroCompute Lab — CPU vs Parallel vs GPU (CUDA)")
+st.caption("FI9070 — Heterogeneous Computing | Real-time Performance Demo")
 
 st.markdown("""
-This interactive lab compares:
+This lab compares:
 
-1️⃣ CPU (Single Thread — baseline)  
-2️⃣ CPU (Parallel — OpenMP-like using Numba)  
-3️⃣ GPU (OpenCL Kernel)
+1️⃣ CPU — Sequential  
+2️⃣ CPU — Parallel (threaded)  
+3️⃣ GPU — CUDA Kernel
 
-No datasets. No models. Only raw computation.
+No datasets. No pretrained models — only raw computation.
 """)
 
-n = st.slider("Select Matrix Size (n x n)", 150, 1300, 500, 50)
+n = st.slider("Matrix size (n x n)", 150, 1200, 500, 50)
 
 st.divider()
 
@@ -62,9 +58,7 @@ def run_cpu_single(n):
 
     start = time.time()
     _ = matmul_single(A, B)
-    end = time.time()
-
-    return end - start
+    return time.time() - start
 
 
 def run_cpu_parallel(n):
@@ -73,70 +67,50 @@ def run_cpu_parallel(n):
 
     start = time.time()
     _ = matmul_parallel(A, B)
-    end = time.time()
-
-    return end - start
+    return time.time() - start
 
 
-# ---------------- GPU OPENCL ----------------
+# ---------------- GPU CUDA ----------------
+@cuda.jit
+def matmul_cuda(A, B, C):
+    row = cuda.grid(1)
+    n = C.shape[0]
+
+    if row < n:
+        for j in range(n):
+            s = 0.0
+            for k in range(n):
+                s += A[row, k] * B[k, j]
+            C[row, j] = s
+
+
 def run_gpu(n):
-    if not OPENCL_AVAILABLE:
-        raise RuntimeError("OpenCL not available on this system.")
+    if not cuda.is_available():
+        raise RuntimeError("CUDA GPU not available. In Colab: Runtime ➜ Change runtime type ➜ GPU")
 
     A = np.random.rand(n, n).astype(np.float32)
     B = np.random.rand(n, n).astype(np.float32)
     C = np.zeros((n, n), dtype=np.float32)
 
-    ctx = cl.create_some_context()
-    queue = cl.CommandQueue(ctx)
+    dA = cuda.to_device(A)
+    dB = cuda.to_device(B)
+    dC = cuda.to_device(C)
 
-    mf = cl.mem_flags
-    A_buf = cl.Buffer(ctx, mf.READ_ONLY | mf.COPY_HOST_PTR, hostbuf=A)
-    B_buf = cl.Buffer(ctx, mf.READ_ONLY | mf.COPY_HOST_PTR, hostbuf=B)
-    C_buf = cl.Buffer(ctx, mf.WRITE_ONLY, C.nbytes)
-
-    kernel = """
-    __kernel void matmul(const int N,
-                         __global float* A,
-                         __global float* B,
-                         __global float* C)
-    {
-        int row = get_global_id(0);
-        int col = get_global_id(1);
-        float sum = 0.0;
-        for (int k = 0; k < N; k++)
-            sum += A[row * N + k] * B[k * N + col];
-        C[row * N + col] = sum;
-    }
-    """
-
-    program = cl.Program(ctx, kernel).build()
+    threads = 128
+    blocks = (n + threads - 1) // threads
 
     start = time.time()
-
-    program.matmul(
-        queue,
-        (n, n),
-        None,
-        np.int32(n),
-        A_buf,
-        B_buf,
-        C_buf
-    )
-
-    cl.enqueue_copy(queue, C, C_buf)
-    queue.finish()
-
+    matmul_cuda[blocks, threads](dA, dB, dC)
+    cuda.synchronize()
     end = time.time()
 
-    return end - start, ctx.devices[0].name
+    return end - start
 
 
 col1, col2, col3 = st.columns(3)
-
 results = {}
 
-if col1.button("Run CPU — Single Thread"):
+if col1.button("Run CPU — Single"):
     t = run_cpu_single(n)
     st.success(f"🧠 CPU Single: {t:.4f} sec")
     results["CPU Single"] = t
@@ -146,12 +120,11 @@ if col2.button("Run CPU — Parallel"):
     st.success(f"🚀 CPU Parallel: {t:.4f} sec")
     results["CPU Parallel"] = t
 
-if col3.button("Run GPU (OpenCL)"):
+if col3.button("Run GPU — CUDA"):
     try:
-        t, dev = run_gpu(n)
-        st.success(f"🎮 GPU: {t:.4f} sec")
-        st.info(f"Device: {dev}")
-        results["GPU"] = t
+        t = run_gpu(n)
+        st.success(f"🎮 GPU CUDA: {t:.4f} sec")
+        results["GPU CUDA"] = t
     except Exception as e:
         st.error(str(e))
 
@@ -160,3 +133,11 @@ st.divider()
 if results:
     st.subheader("📊 Speed Comparison")
     st.bar_chart(results)
+
+st.markdown("""
+### 🧠 Viva Points
+- Sequential vs parallel vs GPU kernels
+- Thread-level parallelism vs massive data parallelism
+- Why GPU wins for large workloads
+- Overhead vs computation trade-off
+""")
